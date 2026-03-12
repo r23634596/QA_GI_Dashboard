@@ -6,6 +6,7 @@ import time
 import concurrent.futures
 import pytz
 import os
+import hashlib
 
 # ---------------------------------------------------------------------------
 # Page Configuration
@@ -282,13 +283,22 @@ def fetch_suite_data_safe(suite: dict, api_key: str, cookie: str = "", referrer:
 # Remarks board helpers
 # ---------------------------------------------------------------------------
 
+def _hash_key(api_key: str) -> str:
+    """One-way hash of API key — used to tag remarks without storing the raw key."""
+    return hashlib.sha256(api_key.encode()).hexdigest()[:12]
+
+
 def _load_remarks() -> pd.DataFrame:
     if os.path.exists(REMARKS_FILE):
         try:
-            return pd.read_csv(REMARKS_FILE)
+            df = pd.read_csv(REMARKS_FILE)
+            # Backfill ApiKeyHash column for older remarks that predate this feature
+            if "ApiKeyHash" not in df.columns:
+                df["ApiKeyHash"] = ""
+            return df
         except Exception:
             pass
-    return pd.DataFrame(columns=["Timestamp", "Author", "Remark"])
+    return pd.DataFrame(columns=["Timestamp", "Author", "Remark", "ApiKeyHash"])
 
 
 def _save_remarks(df: pd.DataFrame) -> None:
@@ -738,8 +748,14 @@ else:
             post_btn = c3.form_submit_button("Post", use_container_width=True)
 
             if post_btn and remark:
-                ts  = datetime.now().astimezone(SGT).strftime("%Y-%m-%d %I:%M:%S %p")
-                new = pd.DataFrame([{"Timestamp": ts, "Author": author, "Remark": remark}])
+                ts       = datetime.now().astimezone(SGT).strftime("%Y-%m-%d %I:%M:%S %p")
+                key_hash = _hash_key(st.session_state.get("api_key", ""))
+                new = pd.DataFrame([{
+                    "Timestamp":  ts,
+                    "Author":     author,
+                    "Remark":     remark,
+                    "ApiKeyHash": key_hash,
+                }])
                 st.session_state["remarks_data"] = pd.concat(
                     [new, st.session_state["remarks_data"]], ignore_index=True
                 )
@@ -747,24 +763,28 @@ else:
                 st.rerun()
 
         df_remarks = st.session_state["remarks_data"]
+        current_hash = _hash_key(st.session_state.get("api_key", ""))
+
         if not df_remarks.empty:
-            col_table, col_clear = st.columns([5, 1])
-            with col_table:
-                st.dataframe(
-                    df_remarks,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Timestamp": st.column_config.TextColumn("Time (SGT)", width="medium"),
-                        "Author":    st.column_config.TextColumn("Author",     width="small"),
-                        "Remark":    st.column_config.TextColumn("Message",    width="large"),
-                    },
-                )
-            with col_clear:
-                if st.button("🗑️ Clear All", use_container_width=True):
-                    st.session_state["remarks_data"] = pd.DataFrame(columns=["Timestamp", "Author", "Remark"])
-                    _save_remarks(st.session_state["remarks_data"])
-                    st.rerun()
+            # Header row
+            h1, h2, h3, h4 = st.columns([2, 1, 4, 1])
+            h1.markdown("**Time (SGT)**")
+            h2.markdown("**Author**")
+            h3.markdown("**Message**")
+            h4.markdown("")
+
+            for idx, row in df_remarks.iterrows():
+                c1, c2, c3, c4 = st.columns([2, 1, 4, 1])
+                c1.write(row.get("Timestamp", ""))
+                c2.write(row.get("Author", ""))
+                c3.write(row.get("Remark", ""))
+                # Only show delete button if this remark belongs to the current user
+                row_hash = row.get("ApiKeyHash", "")
+                if row_hash == current_hash:
+                    if c4.button("🗑️", key=f"del_remark_{idx}", help="Delete your remark"):
+                        st.session_state["remarks_data"] = df_remarks.drop(index=idx).reset_index(drop=True)
+                        _save_remarks(st.session_state["remarks_data"])
+                        st.rerun()
         else:
             st.info("No remarks posted yet.")
 
