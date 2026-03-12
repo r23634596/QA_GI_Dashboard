@@ -548,7 +548,21 @@ if not st.session_state["api_key"]:
         user_key = st.text_input("API Key", type="password")
 
         st.markdown("**Optional — Private API Headers** *(for accurate per-test RUNNING status)*")
-        cookie   = st.text_input("Cookie", type="password", placeholder="Paste your browser Cookie header value…")
+        cookie   = st.text_input(
+            "Cookie",
+            type="password",
+            placeholder="Paste your browser Cookie header value…",
+            help=(
+                "How to get your Cookie:\n\n"
+                "1. Open **Chrome** and go to app.ghostinspector.com\n"
+                "2. Log in if you haven't already\n"
+                "3. Press **F12** to open DevTools → go to the **Network** tab\n"
+                "4. Refresh the page, then click any request to **app.ghostinspector.com**\n"
+                "5. In the **Request Headers** section, find the **Cookie** field\n"
+                "6. Copy the entire value and paste it here\n\n"
+                "⚠️ Your cookie expires periodically — re-enter it if RUNNING status stops working."
+            ),
+        )
         referrer = st.text_input("Referrer", value="https://app.ghostinspector.com/", placeholder="https://app.ghostinspector.com/")
 
         if st.form_submit_button("Start Session"):
