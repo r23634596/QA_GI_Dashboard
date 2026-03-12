@@ -313,33 +313,38 @@ def _save_remarks(df: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_user_config(api_key: str) -> dict:
-    """Load saved folder/hidden-suite config for this API key."""
+    """Load saved folder/hidden-suite config for this API key.
+    Config is keyed by SHA-256 hash — raw API key is never written to disk.
+    """
     try:
+        import json
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r") as f:
-                import json
                 all_configs = json.load(f)
-                return all_configs.get(api_key, {})
+            # Look up by hash only
+            return all_configs.get(_hash_key(api_key), {})
     except Exception:
         pass
     return {}
 
 
 def _save_user_config(api_key: str, folder_ids: str, hidden_ids: str) -> None:
-    """Persist folder/hidden-suite config for this API key."""
+    """Persist folder/hidden-suite config keyed by hashed API key.
+    Raw API key is never written to disk.
+    """
     try:
         import json
         all_configs = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r") as f:
                 all_configs = json.load(f)
-        all_configs[api_key] = {
+        all_configs[_hash_key(api_key)] = {
             "monitored_folder_ids": folder_ids,
             "hidden_suite_ids":     hidden_ids,
         }
         with open(CONFIG_FILE, "w") as f:
-            json.dump(all_configs, f)
-    except Exception as e:
+            json.dump(all_configs, f, indent=2)
+    except Exception:
         pass  # non-critical — silently skip if file write fails
 
 
