@@ -352,6 +352,11 @@ def _save_user_config(api_key: str, folder_ids: str, hidden_ids: str) -> None:
 # Session state initialisation
 # ---------------------------------------------------------------------------
 
+def _bump_counter():
+    """Increment btn_counter so all keyed buttons get new DOM keys → no spam."""
+    st.session_state["btn_counter"] = st.session_state.get("btn_counter", 0) + 1
+
+
 def _init_session_state() -> None:
     defaults = {
         "api_key": None,
@@ -361,6 +366,7 @@ def _init_session_state() -> None:
         "monitored_folder_ids": "",
         "hidden_suite_ids": "",
         "remarks_data": _load_remarks(),
+        "btn_counter": 0,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -488,12 +494,23 @@ def render_tab_content(
             label = f"[{p_suite['status_label']}] {p_suite['name']} ({len(p_suite['rows'])} tests) {date_str}"
             expanded = p_suite["status_label"] in ("FAILING", "RUNNING")
 
+            _bc = st.session_state.get("btn_counter", 0)
             with st.expander(label, expanded=expanded):
                 # Per-suite Run button
-                run_col, _ = st.columns([1, 5])
+                suite_id = p_suite["suite_id"]
+                run_result_key = f"run_result_{suite_id}"
+
+                run_col, msg_col = st.columns([1, 5])
                 with run_col:
-                    if st.button("▶️ Run Suite", key=f"run_{p_suite['suite_id']}"):
-                        res = execute_suite(api_key, p_suite["suite_id"])
+                    if st.button("▶️ Run Suite", key=f"run_{suite_id}_{_bc}"):
+                        st.session_state[run_result_key] = None
+                        res = execute_suite(api_key, suite_id)
+                        st.session_state[run_result_key] = res
+
+                # Show persistent result message outside the button column
+                with msg_col:
+                    res = st.session_state.get(run_result_key)
+                    if res:
                         if res["success"]:
                             st.success(f"✅ {p_suite['name']} triggered!")
                         else:
@@ -650,26 +667,25 @@ else:
         view_mode    = st.radio("View Mode", ["Group by Suite", "Group by Status"])
         auto_refresh = st.checkbox(f"Auto-Refresh ({AUTO_REFRESH_SECONDS}s)", value=False)
 
-        if st.button("✅ Apply & Load", use_container_width=True):
+        _bc = st.session_state.get("btn_counter", 0)
+        if st.button("✅ Apply & Load", use_container_width=True, key=f"apply_load_{_bc}"):
             st.session_state["monitored_folder_ids"] = folder_input
             st.session_state["hidden_suite_ids"]     = hidden_suite_input
-            # Persist config for this API key
             _save_user_config(
                 st.session_state["api_key"], folder_input, hidden_suite_input
             )
-            # Bust cache so fresh data is fetched after config changes
             get_suites_in_folder.clear()
             get_tests_in_suite.clear()
             st.rerun()
 
-        if st.button("🔄 Manual Refresh", use_container_width=True):
+        if st.button("🔄 Manual Refresh", use_container_width=True, key=f"manual_refresh_{_bc}"):
             get_suites_in_folder.clear()
             get_tests_in_suite.clear()
             st.rerun()
 
         st.divider()
         st.markdown("**▶️ Run Suites**")
-        if st.button("🚀 Run All Suites", use_container_width=True):
+        if st.button("🚀 Run All Suites", use_container_width=True, key=f"run_all_{_bc}"):
             raw = st.session_state.get("monitored_folder_ids", "")
             _api_key = st.session_state.get("api_key")
             folder_ids_run = [f.strip() for f in raw.split(",") if f.strip()]
@@ -740,7 +756,41 @@ else:
                 opacity: 1 !important;
                 color: inherit !important;
             }
+            /* Disabled-on-click style */
+            button.btn-clicked {
+                opacity: 0.5 !important;
+                pointer-events: none !important;
+                cursor: not-allowed !important;
+            }
         </style>
+        <script>
+            // Attach once after DOM is ready, re-attach on Streamlit rerenders
+            function attachButtonGuards() {
+                document.querySelectorAll('button[kind="secondary"], button[kind="primary"]').forEach(btn => {
+                    if (btn.dataset.guardAttached) return;
+                    btn.dataset.guardAttached = "1";
+                    btn.addEventListener("click", function() {
+                        // Disable this button immediately on first click
+                        this.classList.add("btn-clicked");
+                        this.disabled = true;
+                        // Re-enable after 5s as a safety fallback in case Streamlit
+                        // doesn't rerender (e.g. network error)
+                        const self = this;
+                        setTimeout(function() {
+                            self.classList.remove("btn-clicked");
+                            self.disabled = false;
+                        }, 5000);
+                    });
+                });
+            }
+
+            // Run on load
+            attachButtonGuards();
+
+            // Re-run whenever Streamlit mutates the DOM (rerenders)
+            const observer = new MutationObserver(attachButtonGuards);
+            observer.observe(document.body, { childList: true, subtree: true });
+        </script>
     """, unsafe_allow_html=True)
 
     # ── Notification / Remarks Board ──────────────────────────────────────
