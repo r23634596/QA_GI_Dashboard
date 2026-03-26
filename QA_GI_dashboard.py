@@ -884,6 +884,13 @@ if not st.session_state["api_key"]:
             st.session_state["username"]               = _saved_name
             st.session_state["monitored_folder_ids"]   = saved.get("monitored_folder_ids", "")
             st.session_state["hidden_suite_ids"]       = saved.get("hidden_suite_ids", "")
+            # Ensure username is always persisted (covers edge case where it wasn't saved)
+            _save_user_config(
+                creds["api_key"],
+                saved.get("monitored_folder_ids", ""),
+                saved.get("hidden_suite_ids", ""),
+                _saved_name,
+            )
             st.rerun()
         else:
             # New user — ask for their name
@@ -1094,8 +1101,24 @@ else:
         # Execution happens on the rerun AFTER the UI has locked
         st.divider()
         if st.button("🚪 Logout", use_container_width=True):
-            for key in ["api_key", "monitored_folder_ids", "hidden_suite_ids", "username"]:
-                st.session_state[key] = "" if key != "api_key" else None
+            # Clear auth + dashboard state but preserve remarks_data (loaded from disk)
+            keys_to_clear = [
+                "api_key", "monitored_folder_ids", "hidden_suite_ids", "username",
+                "private_cookie", "private_referrer", "login_cookie", "login_referrer",
+                "pending_login", "pending_credentials", "folders_applied",
+                "suite_data_cache", "run_all_results", "running_all", "_run_all_pending",
+            ]
+            for key in keys_to_clear:
+                if key in st.session_state:
+                    st.session_state[key] = None if key == "api_key" else (
+                        {} if key in ("suite_data_cache",) else
+                        False if key in ("folders_applied", "running_all", "_run_all_pending") else
+                        ""
+                    )
+            # Clear per-folder selections
+            for _k in list(st.session_state.keys()):
+                if _k.startswith("selected_tests_"):
+                    del st.session_state[_k]
             st.rerun()
 
     username = st.session_state.get("username", "")
