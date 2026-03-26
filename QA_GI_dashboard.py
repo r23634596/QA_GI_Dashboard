@@ -905,7 +905,7 @@ if not st.session_state["api_key"]:
             st.markdown("### 👋 One more step — what's your name?")
             st.caption("This will be used to track your actions in the notification board.")
             with st.form("name_form"):
-                username = st.text_input("Your Name", placeholder="e.g. Ralph")
+                username = st.text_input("Your Name", placeholder="e.g. Joe")
                 if st.form_submit_button("Enter Dashboard", use_container_width=True):
                     if not username.strip():
                         st.error("Please enter your name.")
