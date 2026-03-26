@@ -158,27 +158,22 @@ def get_tests_running_status(suite_id: str, cookie: str, referrer: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def execute_suite(api_key: str, suite_id: str) -> dict:
-    """Trigger a suite run. Returns {success: bool, message: str}.
-    
-    Uses a short connect timeout (10s) but a generous read timeout (120s)
-    since GI's execute endpoint waits until the suite finishes before responding.
-    We treat a ReadTimeout as a successful trigger — the suite was accepted.
+    """Trigger a suite run — fire and forget.
+
+    Uses a 3s read timeout so we don't wait for the suite to finish.
+    Any response (including ReadTimeout) is treated as a successful trigger
+    since GI accepts the request immediately even if it responds slowly.
     """
     try:
-        r = requests.post(
+        requests.post(
             f"https://api.ghostinspector.com/v1/suites/{suite_id}/execute/",
             params={"apiKey": api_key},
-            timeout=(10, 120),  # (connect timeout, read timeout)
+            timeout=(10, 3),  # 10s connect, 3s read — fire and forget
         )
-        r.raise_for_status()
-        data = r.json()
-        if data.get("code") == "SUCCESS":
-            return {"success": True, "message": "Suite triggered successfully."}
-        return {"success": False, "message": data.get("message", "Unknown error from API.")}
+        return {"success": True, "message": "Triggered."}
     except requests.exceptions.ReadTimeout:
-        # GI executes the suite synchronously and can take a long time.
-        # A read timeout means the request was accepted and is running.
-        return {"success": True, "message": "Triggered (response timed out, suite is running)."}
+        # Expected — request was accepted, suite is running
+        return {"success": True, "message": "Triggered."}
     except requests.exceptions.ConnectTimeout:
         return {"success": False, "message": "Connection timed out — could not reach Ghost Inspector."}
     except Exception as e:
@@ -186,20 +181,19 @@ def execute_suite(api_key: str, suite_id: str) -> dict:
 
 
 def execute_test(api_key: str, test_id: str) -> dict:
-    """Trigger a single test run. Returns {success: bool, message: str}."""
+    """Trigger a single test run — fire and forget.
+
+    Uses a 3s read timeout so we don't wait for the test to finish.
+    """
     try:
-        r = requests.post(
+        requests.post(
             f"https://api.ghostinspector.com/v1/tests/{test_id}/execute/",
             params={"apiKey": api_key},
-            timeout=(10, 120),
+            timeout=(10, 3),  # 10s connect, 3s read — fire and forget
         )
-        r.raise_for_status()
-        data = r.json()
-        if data.get("code") == "SUCCESS":
-            return {"success": True, "message": "Test triggered successfully."}
-        return {"success": False, "message": data.get("message", "Unknown error from API.")}
+        return {"success": True, "message": "Triggered."}
     except requests.exceptions.ReadTimeout:
-        return {"success": True, "message": "Triggered (test is running)."}
+        return {"success": True, "message": "Triggered."}
     except requests.exceptions.ConnectTimeout:
         return {"success": False, "message": "Connection timed out."}
     except Exception as e:
@@ -334,10 +328,12 @@ def _load_remarks() -> pd.DataFrame:
             # Backfill ApiKeyHash column for older remarks that predate this feature
             if "ApiKeyHash" not in df.columns:
                 df["ApiKeyHash"] = ""
+            if "Details" not in df.columns:
+                df["Details"] = ""
             return df
         except Exception:
             pass
-    return pd.DataFrame(columns=["Timestamp", "Author", "Remark", "ApiKeyHash"])
+    return pd.DataFrame(columns=["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"])
 
 
 def _save_remarks(df: pd.DataFrame) -> None:
@@ -417,7 +413,6 @@ def _init_session_state() -> None:
         "run_all_progress": 0,
         "run_all_status": "",
         "run_all_results": None,
-        "selected_tests": {},   # {test_id: test_name}
         "suite_data_cache": {},  # {fid: {processed_suites, all_tests_flat, agg}}
         "remarks_data": _load_remarks(),
         "btn_counter": 0,
@@ -469,6 +464,15 @@ def render_tab_content(
             disabled=_locked,
         )
 
+    # ── Per-tab refresh button — spacer aligns it with the input field ──
+    with filter_col2:
+        st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
+        if st.button("🔄 Refresh", key=f"tab_refresh_{fid}_{tab_idx}", use_container_width=True,
+                     disabled=_locked):
+            st.session_state["suite_data_cache"].pop(fid, None)
+            st.session_state.pop(f"selected_tests_{fid}", None)
+            st.rerun()
+
     # ── Placeholder metrics (shown immediately while data loads) ──────────
     m1, m2, m3, m4 = st.columns(4)
     total_ph    = m1.empty()
@@ -486,6 +490,11 @@ def render_tab_content(
     if not api_key:
         st.warning("Session expired. Please log in again.")
         return
+
+    # ── Per-folder selected tests ────────────────────────────────────────
+    _sel_key = f"selected_tests_{fid}"
+    if _sel_key not in st.session_state:
+        st.session_state[_sel_key] = {}
 
     # ── Data fetch — use cache to avoid reloading on checkbox/button clicks ──
     cache = st.session_state.get("suite_data_cache", {})
@@ -621,18 +630,50 @@ def render_tab_content(
                     _sa_col, _sd_col, _sc_col = st.columns([1, 1, 6])
                     if _sa_col.button("Select All", key=f"sa_{suite_id}", use_container_width=True, type="tertiary"):
                         for row in p_suite["rows"]:
-                            st.session_state["selected_tests"][row["Test_ID"]] = row["Test Name"]
+                            st.session_state[_sel_key][row["Test_ID"]] = row["Test Name"]
                     if _sd_col.button("Clear", key=f"sd_{suite_id}", use_container_width=True, type="tertiary"):
                         for row in p_suite["rows"]:
-                            st.session_state["selected_tests"].pop(row["Test_ID"], None)
+                            st.session_state[_sel_key].pop(row["Test_ID"], None)
                     # Recompute AFTER buttons may have updated session state
-                    _n_sel = sum(1 for r in p_suite["rows"] if r["Test_ID"] in st.session_state["selected_tests"])
+                    _n_sel = sum(1 for r in p_suite["rows"] if r["Test_ID"] in st.session_state[_sel_key])
                     if _n_sel:
                         _sc_col.caption(f"{_n_sel} of {_n_suite} selected")
 
-                    # ── Run Selected button ───────────────────────────
+                    # ── data_editor — render and sync FIRST ──────────
+                    df_sel = apply_status_display(
+                        pd.DataFrame(p_suite["rows"]).drop(columns=["Suite Name"], errors="ignore")
+                    )
+                    _tbl_key = f"tbl_{suite_id}"
+                    df_sel.insert(0, "Select", pd.array([
+                        bool(tid in st.session_state[_sel_key])
+                        for tid in df_sel["Test_ID"]
+                    ], dtype="boolean"))
+                    edited = st.data_editor(
+                        df_sel,
+                        use_container_width=True,
+                        hide_index=True,
+                        key=_tbl_key,
+                        column_config={
+                            "Select":    st.column_config.CheckboxColumn("✓", width="small"),
+                            "Link":      st.column_config.LinkColumn("Action", display_text="View"),
+                            "Last Run":  st.column_config.TextColumn("Last Execution", width="medium"),
+                            "Status":    st.column_config.TextColumn("State", width="small"),
+                            "Test Name": st.column_config.TextColumn("Test Name", width="large"),
+                            "Test_ID":   None,
+                        },
+                        disabled=["Test Name", "Status", "Last Run", "Link"],
+                    )
+                    # Sync immediately so Run Selected reflects current state
+                    for _, row in edited.iterrows():
+                        tid = row["Test_ID"]
+                        if row["Select"]:
+                            st.session_state[_sel_key][tid] = row["Test Name"]
+                        else:
+                            st.session_state[_sel_key].pop(tid, None)
+
+                    # ── Run Selected button — computed AFTER sync ─────
                     selected_in_suite = {
-                        tid: tname for tid, tname in st.session_state["selected_tests"].items()
+                        tid: tname for tid, tname in st.session_state[_sel_key].items()
                         if any(r["Test_ID"] == tid for r in p_suite["rows"])
                     }
                     if selected_in_suite:
@@ -673,7 +714,8 @@ def render_tab_content(
                             _entry = pd.DataFrame([{
                                 "Timestamp":  _ts,
                                 "Author":     _username,
-                                "Remark":     f"▶️ Ran {len(selected_in_suite)} test(s) in {p_suite['name']}: {_names} — {_outcome}",
+                                "Remark":     f"▶️ Ran {len(selected_in_suite)} test(s) in {p_suite['name']} — {_outcome}",
+                                "Details":    _names,
                                 "ApiKeyHash": _key_hash,
                             }])
                             st.session_state["remarks_data"] = pd.concat(
@@ -685,47 +727,9 @@ def render_tab_content(
                                 st.success(f"✅ Triggered: {', '.join(sel_triggered)}")
                             if sel_failed:
                                 st.error(f"❌ Failed: {', '.join(sel_failed)}")
-
-                    # ── data_editor with CheckboxColumn ──────────────
-                    df_sel = apply_status_display(
-                        pd.DataFrame(p_suite["rows"]).drop(columns=["Suite Name"], errors="ignore")
-                    )
-                    # Read widget edits FIRST, apply to session state before rendering
-                    _tbl_key   = f"tbl_{suite_id}"
-                    _tbl_state = st.session_state.get(_tbl_key, {})
-                    _edited_rows = _tbl_state.get("edited_rows", {})
-                    _test_list   = list(df_sel["Test_ID"])
-                    for row_idx_str, changes in _edited_rows.items():
-                        if "Select" in changes:
-                            try:
-                                tid = _test_list[int(row_idx_str)]
-                                tname = df_sel.loc[df_sel["Test_ID"] == tid, "Test Name"].iloc[0]
-                                if changes["Select"]:
-                                    st.session_state["selected_tests"][tid] = tname
-                                else:
-                                    st.session_state["selected_tests"].pop(tid, None)
-                            except (IndexError, KeyError):
-                                pass
-
-                    df_sel.insert(0, "Select", [
-                        tid in st.session_state["selected_tests"]
-                        for tid in df_sel["Test_ID"]
-                    ])
-                    st.data_editor(
-                        df_sel,
-                        use_container_width=True,
-                        hide_index=True,
-                        key=_tbl_key,
-                        column_config={
-                            "Select":    st.column_config.CheckboxColumn("✓", width="small"),
-                            "Link":      st.column_config.LinkColumn("Action", display_text="View"),
-                            "Last Run":  st.column_config.TextColumn("Last Execution", width="medium"),
-                            "Status":    st.column_config.TextColumn("State", width="small"),
-                            "Test Name": st.column_config.TextColumn("Test Name", width="large"),
-                            "Test_ID":   None,
-                        },
-                        disabled=["Test Name", "Status", "Last Run", "Link"],
-                    )
+                            # Clear only this folder's cache — fragment reruns naturally
+                            st.session_state["suite_data_cache"].pop(fid, None)
+                            st.session_state[_sel_key] = {}
                 else:
                     st.caption("No active tests found in this suite.")
 
@@ -751,18 +755,49 @@ def render_tab_content(
                 _lc1, _lc2, _lc3 = st.columns([1, 1, 6])
                 if _lc1.button("Select All", key=f"sa_status_{fid}_{tab_idx}", use_container_width=True, type="tertiary"):
                     for _, row in df_all.iterrows():
-                        st.session_state["selected_tests"][row["Test_ID"]] = row["Test Name"]
+                        st.session_state[_sel_key][row["Test_ID"]] = row["Test Name"]
                 if _lc2.button("Clear", key=f"sd_status_{fid}_{tab_idx}", use_container_width=True, type="tertiary"):
                     for _, row in df_all.iterrows():
-                        st.session_state["selected_tests"].pop(row["Test_ID"], None)
+                        st.session_state[_sel_key].pop(row["Test_ID"], None)
                 # Recompute AFTER buttons may have updated session state
-                _n_sall = sum(1 for tid in df_all["Test_ID"] if tid in st.session_state["selected_tests"])
+                _n_sall = sum(1 for tid in df_all["Test_ID"] if tid in st.session_state[_sel_key])
                 if _n_sall:
                     _lc3.caption(f"{_n_sall} of {_n_all} selected")
 
-                # ── Run Selected button ───────────────────────────────
+                # ── data_editor — render and sync FIRST ──────────────
+                df_display = apply_status_display(df_all.copy())
+                _tbl_key_s = f"tbl_status_{fid}_{tab_idx}"
+                df_display.insert(0, "Select", pd.array([
+                    bool(tid in st.session_state[_sel_key])
+                    for tid in df_display["Test_ID"]
+                ], dtype="boolean"))
+                edited_all = st.data_editor(
+                    df_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    key=_tbl_key_s,
+                    column_config={
+                        "Select":     st.column_config.CheckboxColumn("✓", width="small"),
+                        "Link":       st.column_config.LinkColumn("Action", display_text="View"),
+                        "Last Run":   st.column_config.TextColumn("Last Execution", width="medium"),
+                        "Status":     st.column_config.TextColumn("State", width="small"),
+                        "Suite Name": st.column_config.TextColumn("Suite", width="medium"),
+                        "Test Name":  st.column_config.TextColumn("Test Name", width="large"),
+                        "Test_ID":    None,
+                    },
+                    disabled=["Test Name", "Status", "Last Run", "Link", "Suite Name"],
+                )
+                # Sync immediately so Run Selected reflects current state
+                for _, row in edited_all.iterrows():
+                    tid = row["Test_ID"]
+                    if row["Select"]:
+                        st.session_state[_sel_key][tid] = row["Test Name"]
+                    else:
+                        st.session_state[_sel_key].pop(tid, None)
+
+                # ── Run Selected button — computed AFTER sync ─────────
                 selected_in_view = {
-                    tid: tname for tid, tname in st.session_state["selected_tests"].items()
+                    tid: tname for tid, tname in st.session_state[_sel_key].items()
                     if any(r["Test_ID"] == tid for r in all_tests_flat)
                 }
                 if selected_in_view:
@@ -803,7 +838,8 @@ def render_tab_content(
                         _entry = pd.DataFrame([{
                             "Timestamp":  _ts,
                             "Author":     _username,
-                            "Remark":     f"▶️ Ran {len(selected_in_view)} test(s): {_names} — {_outcome}",
+                            "Remark":     f"▶️ Ran {len(selected_in_view)} test(s) — {_outcome}",
+                            "Details":    _names,
                             "ApiKeyHash": _key_hash,
                         }])
                         st.session_state["remarks_data"] = pd.concat(
@@ -815,51 +851,14 @@ def render_tab_content(
                             st.success(f"✅ Triggered: {', '.join(sel_triggered)}")
                         if sel_failed:
                             st.error(f"❌ Failed: {', '.join(sel_failed)}")
-
-                # ── data_editor with CheckboxColumn ──────────────────
-                df_display = apply_status_display(df_all.copy())
-                # Read widget edits FIRST before rendering
-                _tbl_key_s   = f"tbl_status_{fid}_{tab_idx}"
-                _tbl_state_s = st.session_state.get(_tbl_key_s, {})
-                _edited_rows_s = _tbl_state_s.get("edited_rows", {})
-                _test_list_s   = list(df_display["Test_ID"])
-                for row_idx_str, changes in _edited_rows_s.items():
-                    if "Select" in changes:
-                        try:
-                            tid = _test_list_s[int(row_idx_str)]
-                            tname = df_display.loc[df_display["Test_ID"] == tid, "Test Name"].iloc[0]
-                            if changes["Select"]:
-                                st.session_state["selected_tests"][tid] = tname
-                            else:
-                                st.session_state["selected_tests"].pop(tid, None)
-                        except (IndexError, KeyError):
-                            pass
-
-                df_display.insert(0, "Select", [
-                    tid in st.session_state["selected_tests"]
-                    for tid in df_display["Test_ID"]
-                ])
-                st.data_editor(
-                    df_display,
-                    use_container_width=True,
-                    hide_index=True,
-                    key=_tbl_key_s,
-                    column_config={
-                        "Select":     st.column_config.CheckboxColumn("✓", width="small"),
-                        "Link":       st.column_config.LinkColumn("Action", display_text="View"),
-                        "Last Run":   st.column_config.TextColumn("Last Execution", width="medium"),
-                        "Status":     st.column_config.TextColumn("State", width="small"),
-                        "Suite Name": st.column_config.TextColumn("Suite", width="medium"),
-                        "Test Name":  st.column_config.TextColumn("Test Name", width="large"),
-                        "Test_ID":    None,
-                    },
-                    disabled=["Test Name", "Status", "Last Run", "Link", "Suite Name"],
-                )
+                        # Clear only this folder's cache — fragment reruns naturally
+                        st.session_state["suite_data_cache"].pop(fid, None)
+                        st.session_state[_sel_key] = {}
 
     # ── Auto-refresh ──────────────────────────────────────────────────────
     if auto_refresh:
         time.sleep(AUTO_REFRESH_SECONDS)
-        st.session_state["suite_data_cache"] = {}
+        st.session_state["suite_data_cache"].pop(fid, None)
         st.rerun()
 
 
@@ -1038,6 +1037,10 @@ else:
             get_suites_in_folder.clear()
             get_tests_in_suite.clear()
             st.session_state["suite_data_cache"] = {}
+            # Clear all per-folder selections
+            for _k in list(st.session_state.keys()):
+                if _k.startswith("selected_tests_"):
+                    st.session_state[_k] = {}
             st.rerun()
 
         if st.button("🔄 Manual Refresh", use_container_width=True, key=f"manual_refresh_{_bc}",
@@ -1046,6 +1049,9 @@ else:
             get_suites_in_folder.clear()
             get_tests_in_suite.clear()
             st.session_state["suite_data_cache"] = {}
+            for _k in list(st.session_state.keys()):
+                if _k.startswith("selected_tests_"):
+                    st.session_state[_k] = {}
             st.rerun()
 
         st.divider()
@@ -1297,7 +1303,15 @@ else:
                     c1, c2, c3, c4 = st.columns([2, 1, 4, 1])
                     c1.write(row.get("Timestamp", ""))
                     c2.write(row.get("Author", ""))
-                    c3.write(row.get("Remark", ""))
+                    _details_raw = row.get("Details", "")
+                    _details = "" if (not _details_raw or str(_details_raw).lower() in ("nan", "none", "")) else str(_details_raw)
+                    if _details:
+                        _rem_col, _info_col = c3.columns([9, 1])
+                        _rem_col.write(row.get("Remark", ""))
+                        _info_col.button("ℹ️", key=f"info_{row_uid}", help=_details,
+                                         disabled=True, use_container_width=True)
+                    else:
+                        c3.write(row.get("Remark", ""))
                     # System entries are immutable — no delete button
                     if not is_system and row_hash == current_hash:
                         if c4.button("🗑️", key=f"del_{row_uid}", help="Delete your remark"):
