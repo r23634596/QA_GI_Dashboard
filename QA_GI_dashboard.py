@@ -7,6 +7,14 @@ import concurrent.futures
 import pytz
 import os
 import hashlib
+import json
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Page Configuration
@@ -21,6 +29,90 @@ STATUS_PRIORITY = {"RUNNING": 0, "RUNNING (Suite)": 0, "FAILING": 1, "UNKNOWN": 
 REMARKS_FILE = "remarks.csv"
 CONFIG_FILE  = "user_configs.json"
 AUTO_REFRESH_SECONDS = 60
+
+# ---------------------------------------------------------------------------
+# Google Sheets — remarks persistence
+# ---------------------------------------------------------------------------
+
+SHEET_NAME = "GI_Remarks"
+_SCOPES    = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+
+@st.cache_resource
+def _get_gsheet():
+    """Return the GI_Remarks worksheet, or None if not configured."""
+    if not GSPREAD_AVAILABLE:
+        return None
+    try:
+        creds_dict = st.secrets.get("gcp_service_account")
+        if not creds_dict:
+            return None
+        creds = Credentials.from_service_account_info(dict(creds_dict), scopes=_SCOPES)
+        client = gspread.authorize(creds)
+        sheet  = client.open(SHEET_NAME).sheet1
+        # Ensure header row exists
+        if sheet.row_count == 0 or sheet.cell(1, 1).value != "Timestamp":
+            sheet.insert_row(["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"], 1)
+        return sheet
+    except Exception as e:
+        return None
+
+
+def _load_remarks() -> pd.DataFrame:
+    """Load remarks from Google Sheets if configured, else fall back to CSV."""
+    sheet = _get_gsheet()
+    if sheet is not None:
+        try:
+            records = sheet.get_all_records(expected_headers=["Timestamp","Author","Remark","Details","ApiKeyHash"])
+            df = pd.DataFrame(records) if records else pd.DataFrame(
+                columns=["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"])
+            if "Details" not in df.columns:
+                df["Details"] = ""
+            if "ApiKeyHash" not in df.columns:
+                df["ApiKeyHash"] = ""
+            return df
+        except Exception:
+            pass
+    # Fallback: local CSV
+    if os.path.exists(REMARKS_FILE):
+        try:
+            df = pd.read_csv(REMARKS_FILE)
+            if "ApiKeyHash" not in df.columns:
+                df["ApiKeyHash"] = ""
+            if "Details" not in df.columns:
+                df["Details"] = ""
+            return df
+        except Exception:
+            pass
+    return pd.DataFrame(columns=["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"])
+
+
+def _save_remarks(df: pd.DataFrame) -> None:
+    """Save remarks to Google Sheets if configured, else fall back to CSV."""
+    sheet = _get_gsheet()
+    if sheet is not None:
+        try:
+            # Full rewrite: clear data rows, re-append all
+            sheet.clear()
+            headers = ["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"]
+            rows = [headers]
+            for _, row in df.iterrows():
+                rows.append([
+                    str(row.get("Timestamp", "")),
+                    str(row.get("Author", "")),
+                    str(row.get("Remark", "")),
+                    str(row.get("Details", "") or ""),
+                    str(row.get("ApiKeyHash", "")),
+                ])
+            sheet.update(rows)
+            return
+        except Exception as e:
+            st.warning(f"Could not save remarks to Google Sheets: {e}")
+    # Fallback: local CSV
+    try:
+        df.to_csv(REMARKS_FILE, index=False)
+    except Exception as e:
+        st.warning(f"Could not persist remarks to disk: {e}")
+
 
 # Map raw status → display label with colored emoji badge
 STATUS_DISPLAY = {
@@ -321,26 +413,7 @@ def _hash_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()[:12]
 
 
-def _load_remarks() -> pd.DataFrame:
-    if os.path.exists(REMARKS_FILE):
-        try:
-            df = pd.read_csv(REMARKS_FILE)
-            # Backfill ApiKeyHash column for older remarks that predate this feature
-            if "ApiKeyHash" not in df.columns:
-                df["ApiKeyHash"] = ""
-            if "Details" not in df.columns:
-                df["Details"] = ""
-            return df
-        except Exception:
-            pass
-    return pd.DataFrame(columns=["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"])
 
-
-def _save_remarks(df: pd.DataFrame) -> None:
-    try:
-        df.to_csv(REMARKS_FILE, index=False)
-    except Exception as e:
-        st.warning(f"Could not persist remarks to disk: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -905,7 +978,7 @@ if not st.session_state["api_key"]:
             st.markdown("### 👋 One more step — what's your name?")
             st.caption("This will be used to track your actions in the notification board.")
             with st.form("name_form"):
-                username = st.text_input("Your Name", placeholder="e.g. Joe")
+                username = st.text_input("Your Name", placeholder="e.g. Ralph")
                 if st.form_submit_button("Enter Dashboard", use_container_width=True):
                     if not username.strip():
                         st.error("Please enter your name.")
