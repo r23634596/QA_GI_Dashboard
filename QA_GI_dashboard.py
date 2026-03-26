@@ -724,9 +724,13 @@ def render_tab_content(
                             _save_remarks(st.session_state["remarks_data"])
 
                             if sel_triggered:
-                                st.success(f"✅ Triggered: {', '.join(sel_triggered)}")
+                                with st.expander(f"✅ {len(sel_triggered)} triggered successfully", expanded=False):
+                                    for _n in sel_triggered:
+                                        st.markdown(f"&nbsp;&nbsp;🟢 {_n}")
                             if sel_failed:
-                                st.error(f"❌ Failed: {', '.join(sel_failed)}")
+                                with st.expander(f"❌ {len(sel_failed)} failed to trigger", expanded=True):
+                                    for _n in sel_failed:
+                                        st.markdown(f"&nbsp;&nbsp;🔴 {_n}")
                             # Clear only this folder's cache — fragment reruns naturally
                             st.session_state["suite_data_cache"].pop(fid, None)
                             st.session_state[_sel_key] = {}
@@ -848,9 +852,13 @@ def render_tab_content(
                         _save_remarks(st.session_state["remarks_data"])
 
                         if sel_triggered:
-                            st.success(f"✅ Triggered: {', '.join(sel_triggered)}")
+                            with st.expander(f"✅ {len(sel_triggered)} triggered successfully", expanded=False):
+                                for _n in sel_triggered:
+                                    st.markdown(f"&nbsp;&nbsp;🟢 {_n}")
                         if sel_failed:
-                            st.error(f"❌ Failed: {', '.join(sel_failed)}")
+                            with st.expander(f"❌ {len(sel_failed)} failed to trigger", expanded=True):
+                                for _n in sel_failed:
+                                    st.markdown(f"&nbsp;&nbsp;🔴 {_n}")
                         # Clear only this folder's cache — fragment reruns naturally
                         st.session_state["suite_data_cache"].pop(fid, None)
                         st.session_state[_sel_key] = {}
