@@ -39,27 +39,27 @@ _SCOPES    = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.c
 
 @st.cache_resource
 def _get_gsheet():
-    """Return the GI_Remarks worksheet, or None if not configured."""
+    """Return (worksheet, status_msg). worksheet is None if not configured."""
     if not GSPREAD_AVAILABLE:
-        return None
+        return None, "gspread not installed"
     try:
         creds_dict = st.secrets.get("gcp_service_account")
         if not creds_dict:
-            return None
+            return None, "no credentials in secrets"
         creds = Credentials.from_service_account_info(dict(creds_dict), scopes=_SCOPES)
         client = gspread.authorize(creds)
         sheet  = client.open(SHEET_NAME).sheet1
         # Ensure header row exists
         if sheet.row_count == 0 or sheet.cell(1, 1).value != "Timestamp":
             sheet.insert_row(["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"], 1)
-        return sheet
+        return sheet, "connected"
     except Exception as e:
-        return None
+        return None, str(e)
 
 
 def _load_remarks() -> pd.DataFrame:
     """Load remarks from Google Sheets if configured, else fall back to CSV."""
-    sheet = _get_gsheet()
+    sheet, _ = _get_gsheet()
     if sheet is not None:
         try:
             records = sheet.get_all_records(expected_headers=["Timestamp","Author","Remark","Details","ApiKeyHash"])
@@ -88,7 +88,7 @@ def _load_remarks() -> pd.DataFrame:
 
 def _save_remarks(df: pd.DataFrame) -> None:
     """Save remarks to Google Sheets if configured, else fall back to CSV."""
-    sheet = _get_gsheet()
+    sheet, _ = _get_gsheet()
     if sheet is not None:
         try:
             # Full rewrite: clear data rows, re-append all
@@ -1093,6 +1093,12 @@ else:
     # ── Sidebar ───────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Configuration")
+        # ── Remarks backend indicator ─────────────────────────────────
+        _sheet, _sheet_status = _get_gsheet()
+        if _sheet is not None:
+            st.caption("📗 Remarks: Google Sheets")
+        else:
+            st.caption(f"📄 Remarks: Local CSV — _{_sheet_status}_")
 
         folder_input = st.text_area(
             "Folder IDs (comma-separated)",
