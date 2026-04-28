@@ -51,7 +51,7 @@ def _get_gsheet():
         sheet  = client.open(SHEET_NAME).sheet1
         # Ensure header row exists
         if sheet.row_count == 0 or sheet.cell(1, 1).value != "Timestamp":
-            sheet.insert_row(["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"], 1)
+            sheet.insert_row(["Timestamp", "Author", "Remark", "Details", "ApiKeyHash", "Snapshot"], 1)
         return sheet, "connected"
     except Exception as e:
         return None, str(e)
@@ -69,6 +69,8 @@ def _load_remarks() -> pd.DataFrame:
                 df["Details"] = ""
             if "ApiKeyHash" not in df.columns:
                 df["ApiKeyHash"] = ""
+            if "Snapshot" not in df.columns:
+                df["Snapshot"] = ""
             return df
         except Exception:
             pass
@@ -80,6 +82,8 @@ def _load_remarks() -> pd.DataFrame:
                 df["ApiKeyHash"] = ""
             if "Details" not in df.columns:
                 df["Details"] = ""
+            if "Snapshot" not in df.columns:
+                df["Snapshot"] = ""
             return df
         except Exception:
             pass
@@ -93,7 +97,7 @@ def _save_remarks(df: pd.DataFrame) -> None:
         try:
             # Full rewrite: clear data rows, re-append all
             sheet.clear()
-            headers = ["Timestamp", "Author", "Remark", "Details", "ApiKeyHash"]
+            headers = ["Timestamp", "Author", "Remark", "Details", "ApiKeyHash", "Snapshot"]
             rows = [headers]
             for _, row in df.iterrows():
                 rows.append([
@@ -102,6 +106,7 @@ def _save_remarks(df: pd.DataFrame) -> None:
                     str(row.get("Remark", "")),
                     str(row.get("Details", "") or ""),
                     str(row.get("ApiKeyHash", "")),
+                    str(row.get("Snapshot", "") or ""),
                 ])
             sheet.update(rows)
             return
@@ -514,11 +519,18 @@ def render_tab_content(
     now_sgt = datetime.now().astimezone(SGT)
     st.caption(f"ID: `{fid}` | Updated: **{now_sgt.strftime('%I:%M:%S %p')} SGT**")
 
+    _locked = st.session_state.get("running_all", False)
+    _bc_early = st.session_state.get("btn_counter", 0)
+    _rf_btn_col, _ = st.columns([1, 5])
+    with _rf_btn_col:
+        if st.button("🚀 Run Folder", key=f"run_folder_{fid}_{_bc_early}",
+                     disabled=_locked, use_container_width=True):
+            st.session_state[f"run_folder_pending_{fid}"] = True
+            st.rerun()
+
     # Per-view filter inputs
     suite_filter = ""
     status_filter = "All"
-
-    _locked = st.session_state.get("running_all", False)
     filter_col1, filter_col2 = st.columns([3, 1])
 
     if _locked:
@@ -642,8 +654,58 @@ def render_tab_content(
             icon="🍪",
         )
 
-    # ── VIEW 1: Group by Suite ────────────────────────────────────────────
+    # ── Run Folder execution — fires on the rerun after the button is clicked ──
     _bc = st.session_state.get("btn_counter", 0)  # shared by both views
+    if st.session_state.pop(f"run_folder_pending_{fid}", False):
+        _rf_total    = len(processed_suites)
+        _rf_done     = 0
+        _rf_triggered, _rf_failed = [], []
+        _rf_status   = st.empty()
+        _rf_prog     = st.progress(0)
+        _rf_status.info(f"⏳ Triggering **{_rf_total}** suite(s) in **{fname}**…")
+        _rf_key_hash = _hash_key(st.session_state.get("api_key", ""))
+        _rf_username = st.session_state.get("username", "System")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, _rf_total)) as ex:
+            fut_map = {
+                ex.submit(execute_suite, api_key, p["suite_id"]): p
+                for p in processed_suites
+            }
+            for fut in concurrent.futures.as_completed(fut_map):
+                p = fut_map[fut]
+                res = fut.result()
+                (_rf_triggered if res["success"] else _rf_failed).append(p["name"])
+                _rf_done += 1
+                _rf_prog.progress(_rf_done / _rf_total)
+                _rf_status.info(f"⏳ Triggered **{_rf_done}/{_rf_total}** suite(s)…")
+        _rf_status.empty()
+        _rf_prog.empty()
+        _rf_outcome = f"✅ {len(_rf_triggered)} triggered, ❌ {len(_rf_failed)} failed"
+        _rf_snap = json.dumps([
+            {
+                "Suite":   p["name"],
+                "Status":  p["status_label"],
+                "Tests":   len(p["rows"]),
+                "Failing": sum(1 for r in p["rows"] if r["Status"] == "FAILING"),
+            }
+            for p in processed_suites
+        ])
+        _rf_ts = datetime.now().astimezone(SGT).strftime("%Y-%m-%d %I:%M:%S %p")
+        _rf_entry = pd.DataFrame([{
+            "Timestamp":  _rf_ts,
+            "Author":     _rf_username,
+            "Remark":     f"🚀 Ran folder: {fname} ({_rf_total} suites) — {_rf_outcome}",
+            "ApiKeyHash": _rf_key_hash,
+            "Snapshot":   _rf_snap,
+        }])
+        st.session_state["remarks_data"] = pd.concat(
+            [_rf_entry, st.session_state["remarks_data"]], ignore_index=True
+        )
+        _save_remarks(st.session_state["remarks_data"])
+        st.session_state["suite_data_cache"].pop(fid, None)
+        _bump_counter()
+        st.rerun()
+
+    # ── VIEW 1: Group by Suite ────────────────────────────────────────────
     if view_mode == "Group by Suite":
         processed_suites.sort(key=lambda x: STATUS_PRIORITY.get(x["status_label"], 5))
         rendered_any = False
@@ -677,11 +739,20 @@ def render_tab_content(
                         _ts       = datetime.now().astimezone(SGT).strftime("%Y-%m-%d %I:%M:%S %p")
                         _username = st.session_state.get("username", "System")
                         _outcome  = "✅ triggered successfully" if res["success"] else f"❌ failed — {res['message']}"
+                        _snap_rows = []
+                        for _r in p_suite["rows"]:
+                            _lr = _r["Last Run"]
+                            _snap_rows.append({
+                                "Test Name": _r["Test Name"],
+                                "Status":    _r["Status"],
+                                "Last Run":  _lr.strftime("%-d %b %Y, %-I:%M %p") if _lr is not None and pd.notna(_lr) else "—",
+                            })
                         _entry = pd.DataFrame([{
                             "Timestamp":  _ts,
                             "Author":     _username,
                             "Remark":     f"▶️ Ran suite: {p_suite['name']} — {_outcome}",
                             "ApiKeyHash": _key_hash,
+                            "Snapshot":   json.dumps(_snap_rows),
                         }])
                         st.session_state["remarks_data"] = pd.concat(
                             [_entry, st.session_state["remarks_data"]], ignore_index=True
@@ -784,12 +855,22 @@ def render_tab_content(
                             _ts = datetime.now().astimezone(SGT).strftime("%Y-%m-%d %I:%M:%S %p")
                             _names = ", ".join(sel_triggered + sel_failed)
                             _outcome = f"✅ {len(sel_triggered)} triggered, ❌ {len(sel_failed)} failed"
+                            _snap_rows = []
+                            for _r in p_suite["rows"]:
+                                if _r["Test_ID"] in selected_in_suite:
+                                    _lr = _r["Last Run"]
+                                    _snap_rows.append({
+                                        "Test Name": _r["Test Name"],
+                                        "Status":    _r["Status"],
+                                        "Last Run":  _lr.strftime("%-d %b %Y, %-I:%M %p") if _lr is not None and pd.notna(_lr) else "—",
+                                    })
                             _entry = pd.DataFrame([{
                                 "Timestamp":  _ts,
                                 "Author":     _username,
                                 "Remark":     f"▶️ Ran {len(selected_in_suite)} test(s) in {p_suite['name']} — {_outcome}",
                                 "Details":    _names,
                                 "ApiKeyHash": _key_hash,
+                                "Snapshot":   json.dumps(_snap_rows),
                             }])
                             st.session_state["remarks_data"] = pd.concat(
                                 [_entry, st.session_state["remarks_data"]], ignore_index=True
@@ -912,12 +993,23 @@ def render_tab_content(
                         _ts = datetime.now().astimezone(SGT).strftime("%Y-%m-%d %I:%M:%S %p")
                         _names = ", ".join(sel_triggered + sel_failed)
                         _outcome = f"✅ {len(sel_triggered)} triggered, ❌ {len(sel_failed)} failed"
+                        _snap_rows = []
+                        for _r in all_tests_flat:
+                            if _r["Test_ID"] in selected_in_view:
+                                _lr = _r["Last Run"]
+                                _snap_rows.append({
+                                    "Test Name": _r["Test Name"],
+                                    "Suite":     _r.get("Suite Name", ""),
+                                    "Status":    _r["Status"],
+                                    "Last Run":  _lr.strftime("%-d %b %Y, %-I:%M %p") if _lr is not None and pd.notna(_lr) else "—",
+                                })
                         _entry = pd.DataFrame([{
                             "Timestamp":  _ts,
                             "Author":     _username,
                             "Remark":     f"▶️ Ran {len(selected_in_view)} test(s) — {_outcome}",
                             "Details":    _names,
                             "ApiKeyHash": _key_hash,
+                            "Snapshot":   json.dumps(_snap_rows),
                         }])
                         st.session_state["remarks_data"] = pd.concat(
                             [_entry, st.session_state["remarks_data"]], ignore_index=True
@@ -1228,6 +1320,7 @@ else:
                 "Author":     "System",
                 "Remark":     text,
                 "ApiKeyHash": key_hash,
+                "Snapshot":   "",
             }])
             st.session_state["remarks_data"] = pd.concat(
                 [entry, st.session_state["remarks_data"]], ignore_index=True
@@ -1363,6 +1456,7 @@ else:
                     "Author":     author,
                     "Remark":     remark,
                     "ApiKeyHash": key_hash,
+                    "Snapshot":   "",
                 }])
                 st.session_state["remarks_data"] = pd.concat(
                     [new, st.session_state["remarks_data"]], ignore_index=True
@@ -1413,15 +1507,37 @@ else:
                     c1, c2, c3, c4 = st.columns([2, 1, 4, 1])
                     c1.write(row.get("Timestamp", ""))
                     c2.write(row.get("Author", ""))
-                    _details_raw = row.get("Details", "")
-                    _details = "" if (not _details_raw or str(_details_raw).lower() in ("nan", "none", "")) else str(_details_raw)
+                    _details_raw  = row.get("Details", "")
+                    _details      = "" if (not _details_raw or str(_details_raw).lower() in ("nan", "none", "")) else str(_details_raw)
+                    _snapshot_raw = row.get("Snapshot", "")
+                    _has_snapshot = bool(_snapshot_raw and str(_snapshot_raw).lower() not in ("nan", "none", ""))
+                    _remark_text  = row.get("Remark", "")
+
+                    def _render_snapshot(snap_json):
+                        st.caption("**Test status snapshot** — state at time of trigger")
+                        try:
+                            _snap_df = pd.DataFrame(json.loads(str(snap_json)))
+                            if "Status" in _snap_df.columns:
+                                _snap_df["Status"] = _snap_df["Status"].map(lambda v: STATUS_DISPLAY.get(v, v))
+                            st.dataframe(_snap_df, use_container_width=True, hide_index=True)
+                        except Exception:
+                            st.caption("(Could not parse snapshot data)")
+
                     if _details:
                         _rem_col, _info_col = c3.columns([9, 1])
-                        _rem_col.write(row.get("Remark", ""))
+                        if _has_snapshot:
+                            with _rem_col.popover(_remark_text, use_container_width=True):
+                                _render_snapshot(_snapshot_raw)
+                        else:
+                            _rem_col.write(_remark_text)
                         _info_col.button("ℹ️", key=f"info_{row_uid}", help=_details,
                                          disabled=True, use_container_width=True)
                     else:
-                        c3.write(row.get("Remark", ""))
+                        if _has_snapshot:
+                            with c3.popover(_remark_text, use_container_width=True):
+                                _render_snapshot(_snapshot_raw)
+                        else:
+                            c3.write(_remark_text)
                     # System entries are immutable — no delete button
                     if not is_system and row_hash == current_hash:
                         if c4.button("🗑️", key=f"del_{row_uid}", help="Delete your remark"):
