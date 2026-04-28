@@ -519,7 +519,7 @@ def render_tab_content(
     now_sgt = datetime.now().astimezone(SGT)
     st.caption(f"ID: `{fid}` | Updated: **{now_sgt.strftime('%I:%M:%S %p')} SGT**")
 
-    _locked = st.session_state.get("running_all", False)
+    _locked = st.session_state.get("running_all", False) or st.session_state.get(f"loading_{fid}", False)
     _bc_early = st.session_state.get("btn_counter", 0)
     _rf_btn_col, _ = st.columns([1, 5])
     with _rf_btn_col:
@@ -554,6 +554,7 @@ def render_tab_content(
         st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
         if st.button("🔄 Refresh", key=f"tab_refresh_{fid}_{tab_idx}", use_container_width=True,
                      disabled=_locked):
+            st.session_state[f"loading_{fid}"] = True
             st.session_state["suite_data_cache"].pop(fid, None)
             st.session_state.pop(f"selected_tests_{fid}", None)
             st.rerun()
@@ -627,12 +628,14 @@ def render_tab_content(
         status_text.empty()
         progress_bar.empty()
 
-        # Store in cache
+        # Store in cache, clear loading flag, then rerun so buttons re-enable
         st.session_state["suite_data_cache"][fid] = {
             "processed_suites": processed_suites,
             "all_tests_flat":   all_tests_flat,
             "agg":              agg,
         }
+        st.session_state.pop(f"loading_{fid}", None)
+        st.rerun()
     else:
         # Use cached data — no re-fetch on checkbox/button interactions
         processed_suites = cache[fid]["processed_suites"]
@@ -1223,6 +1226,8 @@ else:
             get_suites_in_folder.clear()
             get_tests_in_suite.clear()
             st.session_state["suite_data_cache"] = {}
+            for _fid in [f.strip() for f in folder_input.split(",") if f.strip()]:
+                st.session_state[f"loading_{_fid}"] = True
             # Clear all per-folder selections
             for _k in list(st.session_state.keys()):
                 if _k.startswith("selected_tests_"):
@@ -1235,6 +1240,8 @@ else:
             get_suites_in_folder.clear()
             get_tests_in_suite.clear()
             st.session_state["suite_data_cache"] = {}
+            for _fid in [f.strip() for f in st.session_state.get("monitored_folder_ids", "").split(",") if f.strip()]:
+                st.session_state[f"loading_{_fid}"] = True
             for _k in list(st.session_state.keys()):
                 if _k.startswith("selected_tests_"):
                     st.session_state[_k] = {}
