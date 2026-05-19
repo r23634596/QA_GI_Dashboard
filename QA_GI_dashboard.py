@@ -556,6 +556,20 @@ def _bump_counter():
     st.session_state["btn_counter"] = st.session_state.get("btn_counter", 0) + 1
 
 
+def _refresh_after_run(fid: str, sel_key: str = None, delay: int = 10) -> None:
+    """Show a countdown, then clear the suite cache and rerun the fragment."""
+    _cd = st.empty()
+    for i in range(delay, 0, -1):
+        _cd.info(f"🔄 Refreshing in {i}s…")
+        time.sleep(1)
+    _cd.empty()
+    st.session_state["suite_data_cache"].pop(fid, None)
+    if sel_key:
+        st.session_state[sel_key] = {}
+    _bump_counter()
+    st.rerun()
+
+
 def _init_session_state() -> None:
     defaults = {
         "api_key": None,
@@ -843,6 +857,7 @@ def render_tab_content(
                             [_entry, st.session_state["remarks_data"]], ignore_index=True
                         )
                         _save_remarks(st.session_state["remarks_data"])
+                        _refresh_after_run(fid)
 
                 # Show persistent result message outside the button column
                 with msg_col:
@@ -970,9 +985,7 @@ def render_tab_content(
                                 with st.expander(f"❌ {len(sel_failed)} failed to trigger", expanded=True):
                                     for _n in sel_failed:
                                         st.markdown(f"&nbsp;&nbsp;🔴 {_n}")
-                            # Clear only this folder's cache — fragment reruns naturally
-                            st.session_state["suite_data_cache"].pop(fid, None)
-                            st.session_state[_sel_key] = {}
+                            _refresh_after_run(fid, sel_key=_sel_key)
                 else:
                     st.caption("No active tests found in this suite.")
 
@@ -1109,9 +1122,7 @@ def render_tab_content(
                             with st.expander(f"❌ {len(sel_failed)} failed to trigger", expanded=True):
                                 for _n in sel_failed:
                                     st.markdown(f"&nbsp;&nbsp;🔴 {_n}")
-                        # Clear only this folder's cache — fragment reruns naturally
-                        st.session_state["suite_data_cache"].pop(fid, None)
-                        st.session_state[_sel_key] = {}
+                        _refresh_after_run(fid, sel_key=_sel_key)
 
     # ── Auto-refresh ──────────────────────────────────────────────────────
     if auto_refresh:
