@@ -38,8 +38,8 @@ SHEET_NAME = "GI_Remarks"
 _SCOPES    = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
 @st.cache_resource
-def _get_gsheet():
-    """Return (worksheet, status_msg). worksheet is None if not configured."""
+def _get_gspread_client():
+    """Return (client, status_msg). client is None if credentials are missing."""
     if not GSPREAD_AVAILABLE:
         return None, "gspread not installed"
     try:
@@ -47,12 +47,54 @@ def _get_gsheet():
         if not creds_dict:
             return None, "no credentials in secrets"
         creds = Credentials.from_service_account_info(dict(creds_dict), scopes=_SCOPES)
-        client = gspread.authorize(creds)
-        sheet  = client.open(SHEET_NAME).sheet1
-        # Ensure header row exists
-        if sheet.row_count == 0 or sheet.cell(1, 1).value != "Timestamp":
-            sheet.insert_row(["Timestamp", "Author", "Remark", "Details", "ApiKeyHash", "Snapshot"], 1)
-        return sheet, "connected"
+        return gspread.authorize(creds), "connected"
+    except Exception as e:
+        return None, str(e)
+
+
+def _get_or_create_worksheet(client, spreadsheet_name: str, tab_name: str, headers: list):
+    """Open a worksheet by tab name, creating it with headers if it doesn't exist."""
+    wb = client.open(spreadsheet_name)
+    try:
+        ws = wb.worksheet(tab_name)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = wb.add_worksheet(title=tab_name, rows=100, cols=len(headers))
+        ws.insert_row(headers, 1)
+        return ws
+    # Ensure header row is correct
+    if ws.row_count == 0 or ws.cell(1, 1).value != headers[0]:
+        ws.insert_row(headers, 1)
+    return ws
+
+
+@st.cache_resource
+def _get_gsheet():
+    """Return (worksheet, status_msg) for the remarks sheet."""
+    client, msg = _get_gspread_client()
+    if client is None:
+        return None, msg
+    try:
+        ws = _get_or_create_worksheet(
+            client, SHEET_NAME, "Sheet1",
+            ["Timestamp", "Author", "Remark", "Details", "ApiKeyHash", "Snapshot"],
+        )
+        return ws, "connected"
+    except Exception as e:
+        return None, str(e)
+
+
+@st.cache_resource
+def _get_configs_sheet():
+    """Return (worksheet, status_msg) for the user-configs sheet."""
+    client, msg = _get_gspread_client()
+    if client is None:
+        return None, msg
+    try:
+        ws = _get_or_create_worksheet(
+            client, SHEET_NAME, "GI_UserConfigs",
+            ["KeyHash", "username", "monitored_folder_ids", "hidden_suite_ids"],
+        )
+        return ws, "connected"
     except Exception as e:
         return None, str(e)
 
@@ -426,16 +468,31 @@ def _hash_key(api_key: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _load_user_config(api_key: str) -> dict:
-    """Load saved folder/hidden-suite config for this API key.
-    Config is keyed by SHA-256 hash — raw API key is never written to disk.
+    """Load saved folder/hidden-suite config for this API key from Google Sheets.
+    Falls back to local JSON if Sheets is unavailable.
+    Config is keyed by SHA-256 hash — raw API key is never stored.
     """
+    key_hash = _hash_key(api_key)
+    sheet, _ = _get_configs_sheet()
+    if sheet is not None:
+        try:
+            records = sheet.get_all_records(expected_headers=["KeyHash", "username", "monitored_folder_ids", "hidden_suite_ids"])
+            for row in records:
+                if row.get("KeyHash") == key_hash:
+                    return {
+                        "username":             row.get("username", ""),
+                        "monitored_folder_ids": row.get("monitored_folder_ids", ""),
+                        "hidden_suite_ids":     row.get("hidden_suite_ids", ""),
+                    }
+            return {}
+        except Exception:
+            pass
+    # Fallback: local JSON
     try:
-        import json
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r") as f:
                 all_configs = json.load(f)
-            # Look up by hash only
-            return all_configs.get(_hash_key(api_key), {})
+            return all_configs.get(key_hash, {})
     except Exception:
         pass
     return {}
@@ -443,26 +500,52 @@ def _load_user_config(api_key: str) -> dict:
 
 def _save_user_config(api_key: str, folder_ids: str, hidden_ids: str,
                       username: str = "") -> None:
-    """Persist folder/hidden-suite config and username keyed by hashed API key.
-    Raw API key is never written to disk.
+    """Persist folder/hidden-suite config and username to Google Sheets, keyed by hashed API key.
+    Falls back to local JSON if Sheets is unavailable.
+    Raw API key is never stored.
     """
+    key_hash = _hash_key(api_key)
+    sheet, _ = _get_configs_sheet()
+    if sheet is not None:
+        try:
+            records = sheet.get_all_records(expected_headers=["KeyHash", "username", "monitored_folder_ids", "hidden_suite_ids"])
+            # Find existing row index (1-based, +1 for header)
+            row_idx = None
+            existing_username = ""
+            for i, row in enumerate(records, start=2):
+                if row.get("KeyHash") == key_hash:
+                    row_idx = i
+                    existing_username = row.get("username", "")
+                    break
+            new_row = [
+                key_hash,
+                username if username else existing_username,
+                folder_ids,
+                hidden_ids,
+            ]
+            if row_idx:
+                sheet.update(f"A{row_idx}:D{row_idx}", [new_row])
+            else:
+                sheet.append_row(new_row)
+            return
+        except Exception as e:
+            st.warning(f"Could not save config to Google Sheets: {e}")
+    # Fallback: local JSON
     try:
-        import json
         all_configs = {}
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r") as f:
                 all_configs = json.load(f)
-        existing = all_configs.get(_hash_key(api_key), {})
-        all_configs[_hash_key(api_key)] = {
+        existing = all_configs.get(key_hash, {})
+        all_configs[key_hash] = {
             "monitored_folder_ids": folder_ids,
             "hidden_suite_ids":     hidden_ids,
-            # Only update username if provided, preserve existing otherwise
-            "username": username if username else existing.get("username", ""),
+            "username":             username if username else existing.get("username", ""),
         }
         with open(CONFIG_FILE, "w") as f:
             json.dump(all_configs, f, indent=2)
     except Exception:
-        pass  # non-critical — silently skip if file write fails
+        pass
 
 
 # ---------------------------------------------------------------------------
