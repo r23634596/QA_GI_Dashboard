@@ -69,16 +69,15 @@ def _get_or_create_worksheet(client, spreadsheet_name: str, tab_name: str, heade
 
 @st.cache_resource
 def _get_gsheet():
-    """Return (worksheet, status_msg) for the remarks sheet."""
+    """Return (worksheet, status_msg) for the remarks sheet (first tab)."""
     client, msg = _get_gspread_client()
     if client is None:
         return None, msg
     try:
-        ws = _get_or_create_worksheet(
-            client, SHEET_NAME, "Sheet1",
-            ["Timestamp", "Author", "Remark", "Details", "ApiKeyHash", "Snapshot"],
-        )
-        return ws, "connected"
+        sheet = client.open(SHEET_NAME).sheet1
+        if sheet.row_count == 0 or sheet.cell(1, 1).value != "Timestamp":
+            sheet.insert_row(["Timestamp", "Author", "Remark", "Details", "ApiKeyHash", "Snapshot"], 1)
+        return sheet, "connected"
     except Exception as e:
         return None, str(e)
 
